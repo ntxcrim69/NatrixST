@@ -628,21 +628,16 @@ end
 -- AUTO MUSHROOM
 -- ============================================================
 
--- Checks if a shroom model is actually still collectible.
--- Depleted shrooms stay in the workspace but get flagged via attribute or BillboardGui.
 local function isShroomValid(model)
 	if not model or not model.Parent then return false end
-	-- Check common depletion attributes the game sets to 0.
 	local amount = model:GetAttribute("Amount") or model:GetAttribute("Quantity") or model:GetAttribute("Uses")
 	if amount ~= nil and amount <= 0 then return false end
-	-- Check BillboardGui quantity label (same pattern as isFoodValid).
 	for _, desc in ipairs(model:GetDescendants()) do
 		if desc:IsA("BillboardGui") then
 			local label = desc:FindFirstChildWhichIsA("TextLabel")
 			if label and (tonumber(label.Text) or 1) == 0 then return false end
 		end
 	end
-	-- Must still have physical parts.
 	return model:FindFirstChildWhichIsA("BasePart") ~= nil
 end
 
@@ -694,7 +689,6 @@ local function processAutoShroom()
 	movePlayerTo(pos)
 	task.wait(1.5)
 
-	-- Re-validate after movement; shroom may have been collected or despawned.
 	if not isShroomValid(shroom) then
 		isCollectingShroom = false
 		return
