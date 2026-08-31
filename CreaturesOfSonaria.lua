@@ -990,10 +990,14 @@ end)
 
 AutoTab:CreateToggle("Auto Return to Safe Zone", false, function(state)
 	autoReturnEnabled = state
+	if state then
+		isUnderwaterMode = false
+	end
 end)
 
-AutoTab:CreateToggle("Safe Zone Underwater Mode", false, function(state)
-	isUnderwaterMode = state
+AutoTab:CreateToggle("Auto Return to Safe Zone Underwater", false, function(state)
+	autoReturnEnabled = state
+	isUnderwaterMode  = state
 end)
 
 -- ============================================================
