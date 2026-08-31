@@ -21,7 +21,7 @@ local Library = success and result or loadstring(game:HttpGet("https://raw.githu
 
 local Window = Library:CreateWindow({
 	Name = "Natrix Pro",
-	KeySystem = true,
+	KeySystem = false,
 	KeySettings = {
 		Keys = {"123", "KEY_ADMIN_2026"},
 		Discord = "https://discord.gg/T4gcwqxQCz"
