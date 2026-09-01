@@ -11,13 +11,14 @@ local userInputService  = game:GetService("UserInputService")
 
 local localPlayer = playersService.LocalPlayer
 
--- Load and patch UI library.
+-- Load library source, fix the misplaced `return Library` so CreateDropdown is reachable.
 local librarySource = game:HttpGet("https://raw.githubusercontent.com/ntxcrim69/NatrixLibrary/refs/heads/main/NatrixLibrary.lua")
 
-local success, result = pcall(function()
-	return loadstring(librarySource)()
-end)
-local Library = success and result or loadstring(game:HttpGet("https://raw.githubusercontent.com/ntxcrim69/NatrixLibrary/refs/heads/main/NatrixLibrary.lua"))()
+-- Move `return Library` to the very end by stripping it from its current position.
+librarySource = librarySource:gsub("return Library\n%-%- Component Method: CreateDropdown", "-- Component Method: CreateDropdown")
+librarySource = librarySource .. "\nreturn Library"
+
+local Library = loadstring(librarySource)()
 
 local Window = Library:CreateWindow({
 	Name = "Natrix Pro",
@@ -115,18 +116,31 @@ local lastFastDrink    = 0
 local autoShroomEnabled  = false
 local isCollectingShroom = false
 local lastShroomScan     = 0
+local lastVisitedShroom  = nil
 
-local hitboxEnabled     = false
-local hitboxSize        = 10
+-- Hitbox mode: "OFF", "RageLegit", "Rage"
+local hitboxMode        = "OFF"
 local originalSizes     = {}
 local hitboxHighlights  = {}
 local hitboxConnections = {}
+
+local HITBOX_SIZES = {
+	RageLegit = 18,
+	Rage      = 60,
+}
 
 -- Infinite stamina state.
 local infiniteStaminaEnabled = false
 local uisNamecallHook        = nil
 local hookedStaminaFuncs     = {}
 local staminaFireServerHook  = nil
+local newindexHook           = nil
+
+-- Infinite hunger/thirst state.
+local infiniteHungerThirstEnabled = false
+local hungerThirstNamecallHook    = nil
+local hungerThirstIndexHook       = nil
+local lastInfHungerThirst         = 0
 
 -- ============================================================
 -- UTILITY
@@ -418,7 +432,7 @@ end
 -- ============================================================
 
 local function clearShroomHighlights()
-	for _, highlight in ipairs(shroomHighlights) do
+	for model, highlight in pairs(shroomHighlights) do
 		if highlight and highlight.Parent then highlight:Destroy() end
 	end
 	table.clear(shroomHighlights)
@@ -440,16 +454,13 @@ local function updateShroomEsp()
 	for _, model in ipairs(shroomPiles:GetChildren()) do
 		if not (model:IsA("Model") and model.Parent) then continue end
 		local color = getShroomColor(model)
-		for _, descendant in ipairs(model:GetDescendants()) do
-			if descendant:IsA("BasePart") then
-				local highlight = Instance.new("Highlight")
-				highlight.Parent           = descendant
-				highlight.FillColor        = color
-				highlight.OutlineColor     = color
-				highlight.FillTransparency = 0.5
-				table.insert(shroomHighlights, highlight)
-			end
-		end
+		local highlight = Instance.new("Highlight")
+		highlight.Parent              = model
+		highlight.FillColor           = color
+		highlight.OutlineColor        = color
+		highlight.FillTransparency    = 0.5
+		highlight.OutlineTransparency = 0
+		shroomHighlights[model]       = highlight
 	end
 end
 
@@ -457,13 +468,19 @@ end
 -- HITBOX EXTENDER
 -- ============================================================
 
+local HITBOX_OUTLINE_COLORS = {
+	RageLegit = Color3.fromRGB(255, 200, 50),
+	Rage      = Color3.fromRGB(255, 50, 50),
+}
+
 local function addHitboxHighlight(character)
 	if hitboxHighlights[character] then return end
+	local outlineColor = HITBOX_OUTLINE_COLORS[hitboxMode] or Color3.fromRGB(255, 100, 100)
 	local highlight = Instance.new("Highlight")
 	highlight.Name                = "NatrixHitboxHL"
 	highlight.FillColor           = Color3.fromRGB(255, 255, 255)
-	highlight.OutlineColor        = Color3.fromRGB(255, 100, 100)
-	highlight.FillTransparency    = 0.6
+	highlight.OutlineColor        = outlineColor
+	highlight.FillTransparency    = 0.75
 	highlight.OutlineTransparency = 0
 	highlight.Parent              = character
 	hitboxHighlights[character]   = highlight
@@ -477,14 +494,14 @@ local function removeHitboxHighlight(character)
 end
 
 local function applyHitboxToCharacter(character)
-	if not hitboxEnabled then return end
+	if hitboxMode == "OFF" then return end
+	local size = HITBOX_SIZES[hitboxMode]
 	for _, part in ipairs(character:GetDescendants()) do
 		if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
 			if not originalSizes[part] then
-				originalSizes[part] = {size = part.Size, ltm = part.LocalTransparencyModifier}
+				originalSizes[part] = part.Size
 			end
-			part.Size = Vector3.new(hitboxSize, hitboxSize, hitboxSize)
-			part.LocalTransparencyModifier = 1
+			part.Size = Vector3.new(size, size, size)
 		end
 	end
 	addHitboxHighlight(character)
@@ -492,12 +509,9 @@ end
 
 local function restoreHitboxForCharacter(character)
 	for _, part in ipairs(character:GetDescendants()) do
-		if part:IsA("BasePart") then
-			if originalSizes[part] then
-				part.Size = originalSizes[part].size
-				part.LocalTransparencyModifier = originalSizes[part].ltm
-				originalSizes[part] = nil
-			end
+		if part:IsA("BasePart") and originalSizes[part] then
+			part.Size           = originalSizes[part]
+			originalSizes[part] = nil
 		end
 	end
 	removeHitboxHighlight(character)
@@ -551,6 +565,15 @@ local function disableHitbox()
 	table.clear(originalSizes)
 end
 
+local function reapplyHitbox()
+	for _, player in ipairs(playersService:GetPlayers()) do
+		if player ~= localPlayer and player.Character then
+			restoreHitboxForCharacter(player.Character)
+			applyHitboxToCharacter(player.Character)
+		end
+	end
+end
+
 -- ============================================================
 -- INFINITE STAMINA
 -- ============================================================
@@ -570,22 +593,27 @@ local function isStaminaDrainCandidate(fn)
 	return staminaHits >= 1 and sprintHits >= 1
 end
 
-local function hookStaminaDrainFunctions()
-	local candidates = getgc(false)
-	for _, fn in ipairs(candidates) do
-		if type(fn) ~= "function" then continue end
-		if hookedStaminaFuncs[fn] then continue end
-		if not isStaminaDrainCandidate(fn) then continue end
+local HUNGER_THIRST_KW = {"hunger", "food", "satiation", "fed", "thirst", "water", "hydration"}
 
-		local ok, original = pcall(hookfunction, fn, newcclosure(function(...)
-			if infiniteStaminaEnabled then return end
-			return original(...)
-		end))
-
-		if ok then
-			hookedStaminaFuncs[fn] = original
-		end
+local function matchesHungerThirst(name)
+	local lower = name:lower()
+	for _, kw in ipairs(HUNGER_THIRST_KW) do
+		if lower:find(kw) then return true end
 	end
+	return false
+end
+
+local function installNewindexHook()
+	if newindexHook then return end
+	newindexHook = hookmetamethod(game, "__newindex", newcclosure(function(self, key, value)
+		if key == "Value" and typeof(self) == "Instance"
+			and (self:IsA("NumberValue") or self:IsA("IntValue") or self:IsA("DoubleConstrainedValue")) then
+			local lower = self.Name:lower()
+			if infiniteHungerThirstEnabled and matchesHungerThirst(lower) then return end
+			if infiniteStaminaEnabled and (lower:find("stamina") or lower:find("stam") or lower:find("energy") or lower:find("sprint")) then return end
+		end
+		return newindexHook(self, key, value)
+	end))
 end
 
 local function installUisHook()
@@ -606,10 +634,17 @@ local function installFireServerHook()
 	if staminaFireServerHook then return end
 	staminaFireServerHook = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
 		local method = getnamecallmethod()
-		if infiniteStaminaEnabled and (method == "FireServer" or method == "InvokeServer") then
-			if typeof(self) == "Instance" then
-				local nameLower = self.Name:lower()
-				if nameLower:find("sprint") or nameLower:find("stamina") or nameLower:find("stam") or nameLower:find("run") then
+		if infiniteStaminaEnabled then
+			if method == "FireServer" or method == "InvokeServer" then
+				if typeof(self) == "Instance" then
+					local nameLower = self.Name:lower()
+					if nameLower:find("sprint") or nameLower:find("stamina") or nameLower:find("stam") or nameLower:find("run") then
+						return
+					end
+				end
+			elseif method == "SetAttribute" then
+				local attrName = tostring(select(1, ...)):lower()
+				if attrName:find("stamina") or attrName:find("stam") or attrName:find("energy") or attrName:find("sprint") then
 					return
 				end
 			end
@@ -621,7 +656,7 @@ end
 local function enableInfiniteStamina()
 	installUisHook()
 	installFireServerHook()
-	hookStaminaDrainFunctions()
+	installNewindexHook()
 end
 
 -- ============================================================
@@ -635,10 +670,18 @@ local function isShroomValid(model)
 	for _, desc in ipairs(model:GetDescendants()) do
 		if desc:IsA("BillboardGui") then
 			local label = desc:FindFirstChildWhichIsA("TextLabel")
-			if label and (tonumber(label.Text) or 1) == 0 then return false end
+			if label then
+				local val = tonumber(label.Text)
+				if val and val <= 0 then return false end
+			end
 		end
 	end
-	return model:FindFirstChildWhichIsA("BasePart") ~= nil
+	for _, part in ipairs(model:GetDescendants()) do
+		if part:IsA("BasePart") and part.Transparency < 0.99 then
+			return true
+		end
+	end
+	return false
 end
 
 local function getShroomPosition(model)
@@ -647,31 +690,34 @@ local function getShroomPosition(model)
 	return nil
 end
 
-local function findNearestShroom()
-	local character = localPlayer.Character
-	if not character then return nil end
-	local rootPart = character:FindFirstChild("HumanoidRootPart")
-	if not rootPart then return nil end
-
+local function pickRandomShroom()
 	local interactions = workspace:FindFirstChild("Interactions")
 	if not interactions then return nil end
 	local shroomPiles = interactions:FindFirstChild("ShoomPiles")
 	if not shroomPiles then return nil end
 
-	local closestShroom, minDistance = nil, 99999
-
+	local validShrooms = {}
 	for _, model in ipairs(shroomPiles:GetChildren()) do
-		if not (model:IsA("Model") and isShroomValid(model)) then continue end
-		local pos = getShroomPosition(model)
-		if pos then
-			local dist = (rootPart.Position - pos).Magnitude
-			if dist < minDistance then
-				minDistance = dist
-				closestShroom = model
-			end
+		if model:IsA("Model") and isShroomValid(model) then
+			table.insert(validShrooms, model)
 		end
 	end
-	return closestShroom
+
+	if #validShrooms == 0 then return nil end
+
+	local candidates = {}
+	for _, model in ipairs(validShrooms) do
+		if model ~= lastVisitedShroom then
+			table.insert(candidates, model)
+		end
+	end
+
+	if #candidates == 0 then
+		lastVisitedShroom = nil
+		candidates = validShrooms
+	end
+
+	return candidates[math.random(1, #candidates)]
 end
 
 local function processAutoShroom()
@@ -679,18 +725,23 @@ local function processAutoShroom()
 	lastShroomScan = tick()
 	if not autoShroomEnabled or isCollectingShroom then return end
 
-	local shroom = findNearestShroom()
+	local shroom = pickRandomShroom()
 	if not isShroomValid(shroom) then return end
 
 	local pos = getShroomPosition(shroom)
 	if not pos then return end
 
 	isCollectingShroom = true
+	lastVisitedShroom  = shroom
+
 	movePlayerTo(pos)
-	task.wait(1.5)
+
+	task.wait(0.5)
+	keytap(0x45)
 
 	if not isShroomValid(shroom) then
 		isCollectingShroom = false
+		lastShroomScan = 0
 		return
 	end
 
@@ -708,7 +759,7 @@ local function processAutoShroom()
 			end
 		else
 			local primary = shroom.PrimaryPart or shroom:FindFirstChildWhichIsA("BasePart")
-			if primary then
+			if primary and isShroomValid(shroom) then
 				local rootPart = localPlayer.Character and localPlayer.Character:FindFirstChild("HumanoidRootPart")
 				if rootPart then
 					rootPart.CFrame = CFrame.new(primary.Position + Vector3.new(0, 2, 0))
@@ -797,6 +848,50 @@ local function processFastEat()
 	end
 end
 
+local function installHungerThirstNamecallHook()
+	if hungerThirstNamecallHook then return end
+	hungerThirstNamecallHook = hookmetamethod(game, "__namecall", newcclosure(function(self, ...)
+		local method = getnamecallmethod()
+		if infiniteHungerThirstEnabled then
+			if method == "GetAttribute" then
+				if matchesHungerThirst(tostring(select(1, ...))) then return 100 end
+			elseif method == "SetAttribute" then
+				if matchesHungerThirst(tostring(select(1, ...))) then return end
+			end
+		end
+		return hungerThirstNamecallHook(self, ...)
+	end))
+end
+
+local function installHungerThirstIndexHook()
+	if hungerThirstIndexHook then return end
+	hungerThirstIndexHook = hookmetamethod(game, "__index", newcclosure(function(self, key)
+		if infiniteHungerThirstEnabled and key == "Value"
+			and typeof(self) == "Instance"
+			and (self:IsA("NumberValue") or self:IsA("IntValue") or self:IsA("DoubleConstrainedValue"))
+			and matchesHungerThirst(self.Name) then
+			return 100
+		end
+		return hungerThirstIndexHook(self, key)
+	end))
+end
+
+local function processInfiniteHungerThirst()
+	if not infiniteHungerThirstEnabled then return end
+	if tick() - lastInfHungerThirst < 0.5 then return end
+	lastInfHungerThirst = tick()
+	local character = localPlayer.Character
+	if not character then return end
+	for _, desc in ipairs(character:GetDescendants()) do
+		if (desc:IsA("NumberValue") or desc:IsA("IntValue")) and matchesHungerThirst(desc.Name) then
+			pcall(function() desc.Value = 100 end)
+		end
+	end
+	for _, attrName in ipairs({"Hunger", "Thirst", "Food", "Water", "Satiation", "Hydration", "Fed", "Drink"}) do
+		pcall(function() character:SetAttribute(attrName, 100) end)
+	end
+end
+
 local function processFastDrink()
 	if not fastDrinkEnabled then return end
 	if tick() - lastFastDrink < 0.1 then return end
@@ -844,6 +939,26 @@ local function processAutoToken()
 	isCollectingToken = false
 end
 
+local lastInfStamina = 0
+local function processInfiniteStamina()
+	if not infiniteStaminaEnabled then return end
+	if tick() - lastInfStamina < 0.5 then return end
+	lastInfStamina = tick()
+	local character = localPlayer.Character
+	if not character then return end
+	for _, desc in ipairs(character:GetDescendants()) do
+		if (desc:IsA("NumberValue") or desc:IsA("IntValue")) then
+			local lower = desc.Name:lower()
+			if lower:find("stamina") or lower:find("stam") or lower:find("energy") or lower:find("sprint") then
+				pcall(function() desc.Value = 100 end)
+			end
+		end
+	end
+	for _, attrName in ipairs({"Stamina", "Stam", "Energy", "SprintEnergy", "Sprint"}) do
+		pcall(function() character:SetAttribute(attrName, 100) end)
+	end
+end
+
 runService.Heartbeat:Connect(function()
 	updateEsp()
 
@@ -856,6 +971,8 @@ runService.Heartbeat:Connect(function()
 	processAutoDrink()
 	processFastEat()
 	processFastDrink()
+	processInfiniteHungerThirst()
+	processInfiniteStamina()
 	processAutoToken()
 	processAutoShroom()
 end)
@@ -1004,27 +1121,27 @@ end)
 -- COMBAT TAB
 -- ============================================================
 
-CombatTab:CreateToggle("Hitbox Extender Coming Soon..", false, function(state)
-	hitboxEnabled = state
+CombatTab:CreateToggle("Infinite Hunger & Thirst", false, function(state)
+	infiniteHungerThirstEnabled = state
 	if state then
-		enableHitbox()
-	else
-		disableHitbox()
+		installHungerThirstNamecallHook()
+		installHungerThirstIndexHook()
+		installNewindexHook()
 	end
 end)
 
-CombatTab:CreateSlider("Hitbox Size", 1, 50, 10, function(val)
-	hitboxSize = val
-	if not hitboxEnabled then return end
-	for _, player in ipairs(playersService:GetPlayers()) do
-		if player ~= localPlayer and player.Character then
-			restoreHitboxForCharacter(player.Character)
-		end
-	end
-	for _, player in ipairs(playersService:GetPlayers()) do
-		if player ~= localPlayer and player.Character then
-			applyHitboxToCharacter(player.Character)
-		end
+CombatTab:CreateDropdown("Hitbox Mode", {"OFF", "Rage Legit", "Rage"}, "OFF", function(selected)
+	local prev = hitboxMode
+
+	if selected == "OFF" then
+		hitboxMode = "OFF"
+		disableHitbox()
+	elseif selected == "Rage Legit" then
+		hitboxMode = "RageLegit"
+		if prev == "OFF" then enableHitbox() else reapplyHitbox() end
+	elseif selected == "Rage" then
+		hitboxMode = "Rage"
+		if prev == "OFF" then enableHitbox() else reapplyHitbox() end
 	end
 end)
 
